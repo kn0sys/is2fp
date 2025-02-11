@@ -11,15 +11,26 @@ use libp2p::{
     gossipsub, mdns,
     swarm::{SwarmEvent},
 };
+use rand::seq::*;
 use serde::{Deserialize, Serialize};
+use sha2::{
+    Digest,
+    Sha512,
+};
+use rocket::serde::json::Json;
 use lazy_static::lazy_static;
 use std::sync::Mutex;
 
-// global
+const RELAY_KEY: &str = "b32";
+const FLUFF_KEY: &str = "fluff";
+const NETWORK_FLUFF: u64 = 32;
+const POW_LIMIT: u64 = 123456789;
+
 lazy_static! {
-    /// prevents infinite loop when checking for running router
-    static ref B32_EXCHANGE_TRIGGER: Mutex<bool> = Mutex::new(false);
+    /// used to prevent LMDB errors while propagating fluff messages
+    static ref IS_FLUFF_LOCKED: Mutex<bool> = Mutex::new(false);
 }
+
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(crate = "rocket::serde")]
@@ -69,11 +80,15 @@ impl MessageLimits {
 pub struct Message {
     pub mid: String,
     pub data: String,
-    pub created: i64,
+    pub created: u64,
     pub from: String,
     pub to: String,
     pub m_type: MessageType,
     pub fluff_probability: f64,
+    pub pow_problem: String,
+    /// H(solution) = H(fluff_probability+R), where R is some
+    /// random number 1-123456789.
+    pub pow_solution: String,
 }
 
 /// app port
@@ -115,13 +130,14 @@ fn handle_messages(msg: Message, peer_id: libp2p::PeerId, local_peer_id: libp2p:
         // save b32.i2p for stem selection
         let mid = &msg.mid.clone();
         let l = &db::DATABASE_LOCK;
-        let key = format!("b32-{}", &peer_id);
+        let key = format!("{}-{}", RELAY_KEY, &peer_id);
         let b_key = key.as_bytes().to_vec();
         let b32 = db::DatabaseEnvironment::read(&l.env, &l.handle, &b_key)
             .unwrap_or_default();
         if b32.is_empty() {
             log::info!("writing new relay:{:?} to lmdb", &peer_id);
-            db::write_chunks(&l.env, &l.handle, &b_key, &msg.data.as_bytes().to_vec())
+            let bytes_b32 = bincode::serialize(&msg.data).unwrap_or_default();
+            db::write_chunks(&l.env, &l.handle, &b_key, &bytes_b32)
                 .unwrap_or_else(|_| log::error!("failed to add b32: {} for peer {}", &msg.data, &peer_id));
         } else {
             // TODO: environment variable for saving all messages
@@ -145,14 +161,116 @@ fn handle_messages(msg: Message, peer_id: libp2p::PeerId, local_peer_id: libp2p:
     Ok(())
 }
 
-pub async fn select_invisible_stem(msg: Message, peers: Vec<libp2p::PeerId>) -> Result<(), is2fp_error::Ip2pError> {
+pub async fn select_invisible_stem(mut msg: Message, peers: Vec<&libp2p::PeerId>) -> Result<(), is2fp_error::Ip2pError> {
+    log::info!("start invisible stem selection");
     // get random peer and their b32 address
-
+    let r_peer = *peers.choose(&mut rand::rng()).unwrap();
+    let l = &db::DATABASE_LOCK;
+    let b32_key = format!("{}-{}", RELAY_KEY, r_peer);
+    let bytes_b32_key = b32_key.as_bytes().to_vec();
+    let b_b32 = db::DatabaseEnvironment::read(&l.env, &l.handle, &bytes_b32_key)
+        .unwrap_or_default();
+    let relay_b32: String = bincode::deserialize(&b_b32[..]).unwrap_or_default();
+    // generate pow problem
+    let big_r: u64 = rand::random_range(0..POW_LIMIT);
+    let mut hasher = Sha512::new();
+    hasher.update(format!("{}", big_r + NETWORK_FLUFF).as_bytes());
+    let hash = hasher.finalize().to_owned();
+    let s_hash = hex::encode(&hash[..]);
+    log::debug!("pow hash: {}", &s_hash);
+    msg.pow_problem = String::from(&s_hash);
+    // pass message to invisible stem via i2p http proxy
+    info!("broadcasting message to relay: {}", &relay_b32);
+    let host = get_i2p_http_proxy();
+    let proxy = reqwest::Proxy::http(&host)
+        .map_err(|_| is2fp_error::Ip2pError::Relay)?;
+    let client = reqwest::Client::builder().proxy(proxy).build();
+    match client.map_err(|_| is2fp_error::Ip2pError::Relay)?
+        .get(format!("http://{}/message", &relay_b32))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let res = response.json::<Message>().await;
+            match res {
+                Ok(_) => log::info!("relay success"),
+                _ => log::warn!("unknown relay status"),
+            }
+        }
+        Err(e) => {
+            error!("failed to relay due to: {:?}", e);
+        }
+    }
     Ok(())
 }
 
+fn extract_fluff() -> Vec<Message> {
+    let l = &db::DATABASE_LOCK;
+    let k = FLUFF_KEY.as_bytes().to_vec();
+    let b_fluff = db::DatabaseEnvironment::read(&l.env, &l.handle, &k).unwrap_or_default();
+    let v_fluff: Vec<Message> = bincode::deserialize(&b_fluff[..]).unwrap_or_default();
+    if v_fluff.is_empty() {
+        log::info!("no messages found for fluff extraction");
+    }
+    v_fluff
+}
+
+/// Consume a message over i2p relay from a random peer.
+///
+/// Solve the proof-of-work and timestamp the message into LMDB.
+///
+/// Fluff propagation vector is consumed by the network event loop on
+///
+/// a randomly, rotating basis. A `Mutex<bool>` prevents access while
+///
+/// mutating the vector.
+pub fn inject_fluff(j_msg: Json<Message>) -> Result<(), is2fp_error::Ip2pError> {
+    *IS_FLUFF_LOCKED.lock().unwrap() = true;
+    use::std::time::{SystemTime, UNIX_EPOCH };
+    log::info!("injecting fluff msg: {}", &j_msg.mid.clone());
+    let l = &db::DATABASE_LOCK;
+    let k = FLUFF_KEY.as_bytes().to_vec();
+    let b_old_fluff = db::DatabaseEnvironment::read(&l.env, &l.handle, &k)
+        .unwrap_or_default();
+    let mut old_fluff: Vec<Message> = bincode::deserialize(&b_old_fluff[..])
+        .unwrap_or_default();
+    let start = SystemTime::now();
+    let created = start.duration_since(UNIX_EPOCH).map_err(|_| is2fp_error::Ip2pError::Unknown)?.as_secs(); 
+    let data = j_msg.data.clone();
+    let pow_problem = j_msg.pow_problem.clone();
+    let pow_solution = do_pow(&pow_problem)?;
+    let m_type = MessageType::Fluff;
+    let new_msg: Message = Message { created, data, m_type, pow_problem, pow_solution, ..Default::default() };
+    old_fluff.push(new_msg);
+    db::DatabaseEnvironment::delete(&l.env, &l.handle, &k)
+        .unwrap_or_else(|_| log::error!("failed to delete fluff injection vector"));
+    let new_fluff = bincode::serialize(&old_fluff).unwrap_or_default();
+    db::write_chunks(&l.env, &l.handle, &k, &new_fluff)
+        .unwrap_or_else(|_| log::error!("failed to write new fluff injection vector"));
+    *IS_FLUFF_LOCKED.lock().unwrap() = false;
+    Ok(())
+}
+
+fn do_pow(problem: &String) -> Result<String, is2fp_error::Ip2pError> {
+    // generate pow solution
+    for n in 0..POW_LIMIT {
+        let mut hasher = Sha512::new();
+        hasher.update(format!("{}", n + NETWORK_FLUFF));
+        let hash = hasher.finalize().to_owned();
+        let s_hash = hex::encode(&hash[..]);
+        if s_hash == *problem {
+            log::info!("found solution to: {}", problem);
+            return Ok(s_hash);
+        }
+    }
+    log::error!("failure to solve: {}", problem);
+    Err(is2fp_error::Ip2pError::PowError)
+}
+
 pub async fn run_network() {
-    log::info!("Enter messages via STDIN and they will be sent to connected peers using IS2FP");
+    log::info!("IS2FP Console v0.1.0-alpha\n
+                add peer /ip4/<IP>/tcp/<PORT>/p2p/<PEER_ID>\n
+                send <MESSAGE>");
     // fluff probability and stem extension timeout will be randomized per message
     let mut node = DandelionNode::new(
         0.0,
@@ -169,10 +287,18 @@ pub async fn run_network() {
     let mut stdin = io::BufReader::new(io::stdin()).lines();
     // Kick it off
     loop {
-
-        // TODO: optimize fluff propagation interval
-        let tick = tokio::time::sleep(Duration::from_secs(10));
-
+        // Use network fluff as millisecond range generated randomly on network event loop
+        let r_tick = rand::random_range(0..NETWORK_FLUFF);
+        let tick = tokio::time::sleep(Duration::from_millis(r_tick));
+        let fluff_msgs: Vec<Message> = extract_fluff();
+        if !fluff_msgs.is_empty() && !*IS_FLUFF_LOCKED.lock().unwrap() {
+            for m in fluff_msgs {    
+                let b_msg = bincode::serialize(&m).unwrap_or_default();
+                if let Err(e) = node.broadcast_message(b_msg, fluff_topic.clone()) {
+                    log::error!("fluff propagation failed for msg id: {} because: {:?}", &m.mid, e);
+                }
+            }
+        }
         select! {
             Ok(Some(line)) = stdin.next_line() => {
                 if line.starts_with("add peer ") {
@@ -188,16 +314,19 @@ pub async fn run_network() {
                     // TODO: send to invisible stem extension
                     let mut msg: Message = Default::default();
                     msg.data = String::from(p_msg);
-                    let b_msg = bincode::serialize(&msg).unwrap_or_default();
-                    if let Err(e) = node.broadcast_message(b_msg, fluff_topic.clone()) {
-                        log::error!("Publish error: {e:?}");
-                    }
+                    let peers = node.swarm.connected_peers().collect::<Vec<_>>();
+                    select_invisible_stem(msg, peers).await
+                        .unwrap_or_else(|_| log::error!("failed to select invisible stem"));
+                    // TODO: option for clear message broadcasting (i.e. debug mode)
+                    //if let Err(e) = node.broadcast_message(b_msg, fluff_topic.clone()) {
+                    //    log::error!("Publish error: {e:?}");
+                    //}
                 }
             }
             event = node.swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(DandelionBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, multiaddr) in list {
-                        log::info!("mDNS discovered a new peer: {multiaddr}");
+                        log::info!("mDNS discovered a new stem: {multiaddr}");
                         if let Err(e) = node.connect(multiaddr).await {
                             log::error!("failed to connect to {:?}: {:?}", &peer_id, e);
                         }
@@ -205,7 +334,7 @@ pub async fn run_network() {
                 },
                 SwarmEvent::Behaviour(DandelionBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                     for (peer_id, _multiaddr) in list {
-                        println!("mDNS discover peer has expired: {peer_id}");
+                        println!("mDNS stem has expired: {peer_id}");
                         if let Err(e) = node.handle_peer_disconnect(peer_id).await {
                             log::error!("failed to handle {peer_id} disconnect: {:?}", e);
                         }
@@ -228,8 +357,8 @@ pub async fn run_network() {
                 },
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     log::info!("Connected to peer: {:?}", peer_id);
-                    // wait for protocol confirmation
-                    tokio::time::sleep(Duration::from_secs(2)).await; 
+                    // TODO: optimize waiting for protocol confirmation
+                    tokio::time::sleep(Duration::from_secs(3)).await; 
                     // execute b32 address exchange
                     let mut msg: Message = Default::default();
                     msg.data = i2p::get_destination().unwrap_or_default();
@@ -252,7 +381,6 @@ pub async fn run_network() {
             }
         }
     }
-
 }
 
 /// primary is2fp entry point

@@ -10,6 +10,8 @@ pub enum Ip2pError {
     I2P,
     J4I2PRS,
     Message,
+    PowError,
+    Relay,
     RocketError(rocket::Error),
     Unknown,
 }

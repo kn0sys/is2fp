@@ -11,22 +11,9 @@ use rocket::{
 };
 
 use is2fp::{i2p, error as ip2p_error, utils};
-use serde::{Deserialize, Serialize};
-
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(crate = "rocket::serde")]
-pub struct Message {
-    pub mid: String,
-    pub data: String,
-    pub created: i64,
-    pub from: String,
-    pub to: String,
-}
 
 // Catchers
 //----------------------------------------------------------------
-
 #[catch(404)]
 pub fn not_found() -> Custom<Json<ip2p_error::ErrorResponse>> {
     Custom(
@@ -46,6 +33,8 @@ pub fn internal_error() -> Custom<Json<ip2p_error::ErrorResponse>> {
         }),
     )
 }
+// End Catchers
+//----------------------------------------------------------------
 
 /// If i2p not in the state of rejecting tunnels this will return `open: true`
 ///
@@ -62,8 +51,9 @@ pub async fn get_i2p_status() -> Custom<Json<i2p::HttpProxyStatus>> {
 
 /// Recieve messages here
 #[post("/", data = "<message>")]
-pub async fn message(message: Json<Message>) -> Custom<Json<Message>> {
-    // TODO: broadcast message via MDNS
+pub async fn message(message: Json<utils::Message>) -> Custom<Json<utils::Message>> {
+    utils::inject_fluff(message)
+        .unwrap_or_else(|_| log::error!("failed to inject message for fluff propagation"));
     Custom(Status::Ok, Json(Default::default()))
 }
 
