@@ -184,6 +184,10 @@ pub async fn select_invisible_stem(mut msg: Message, peers: Vec<&libp2p::PeerId>
     let s_hash = hex::encode(&hash[..]);
     log::debug!("pow hash: {}", &s_hash);
     msg.pow_problem = String::from(&s_hash);
+    let mut hasher = Sha512::new();
+    hasher.update(&msg.data.as_bytes());
+    let hash = hasher.finalize().to_owned();
+    msg.mid = hex::encode(&hash[..]);
     // pass message to invisible stem via i2p http proxy
     info!("broadcasting message to relay: {}", &relay_b32);
     let host = get_i2p_http_proxy();
@@ -256,6 +260,7 @@ pub fn inject_fluff(j_msg: Json<Message>) -> Result<(), is2fp_error::Ip2pError> 
 }
 
 fn do_pow(problem: &String) -> Result<String, is2fp_error::Ip2pError> {
+    log::info!("begin pow for : {}", problem);
     // generate pow solution
     for n in 0..POW_LIMIT {
         let mut hasher = Sha512::new();

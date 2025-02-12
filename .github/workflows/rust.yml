@@ -1,4 +1,4 @@
-name: Rust
+name: cargo-build
 
 on:
   push:
@@ -16,7 +16,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install dependencies
+      run: sudo apt install -y libssl-dev build-essential && rustup toolchain install nightly
     - name: Build
       run: RUSTFLAGS="-Z threads=4" cargo +nightly build --future-incompat-report && cargo clippy
-#    - name: Run tests
-#      run: cargo test --verbose
