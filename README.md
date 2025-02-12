@@ -18,14 +18,13 @@ Dandelion-IS2FP uses random i2p relay servers for stem selection and fluff propa
 ### IS2FP Console
 
 * Add peer manually `add peer <Multiaddr>`
-* Send `<MESSAGE>` sends a message via chat
+* Send `send MESSAGE>` sends a message via chat
 
 ### API
 
-`/message` - recieve a message to propagate
-`/i2p/status` - check i2p status
-
-TODO: add peer, etc.
+* `/message` - recieve a message to propagate
+* `/i2p/status` - check i2p status
+* TODO: add peer, etc.
 
 ### j4-i2p-rs - embedded i2p
 

@@ -1,0 +1,31 @@
+name: cargo-build-release
+
+on:
+  push:
+    paths-ignore:
+      - 'assets/**'
+      - 'docs/**'
+      - 'scripts/**'
+      - 'README.md'
+    branches: ["v0.*", "!main", "!dev"]
+  pull_request:
+    branches: ["v0.*", "!main", "!dev"]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: sudo apt install -y libssl-dev build-essential gettext ant
+      - name: Extract branch name
+        shell: bash
+        run: echo "branch=$(echo ${GITHUB_REF#refs/heads/})" >>$GITHUB_OUTPUT
+        id: extract_branch
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+      - run: ./scripts/build_release.sh ${{ steps.extract_branch.outputs.branch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: is2fp-x86_64-linux-gnu-${{ steps.extract_branch.outputs.branch }}
+          path: is2fp-x86_64-linux-gnu-${{ steps.extract_branch.outputs.branch }}.tar.bz2
