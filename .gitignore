@@ -13,6 +13,7 @@ opt/*
 *.key
 router.info
 router.keys.dat
+router.ping
 prngseed.rnd
 hostsdb.blockfile
 certificates/
