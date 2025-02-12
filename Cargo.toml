@@ -1,6 +1,6 @@
 [package]
 name = "is2fp"
-version = "0.1.0"
+version = "0.1.0-alpha"
 edition = "2021"
 authors = ["n12n"]
 
@@ -10,7 +10,7 @@ env_logger = "0.11.0"
 futures = "0.3.30"
 hex = "0.4.3"
 j4-i2p-rs = { path = "./j4-i2p-rs", version = "0.3.1-alpha" }
-kn0sys-lmdb-rs = "0.1.5"
+kn0sys-lmdb-rs = "0.1.6"
 lazy_static = "1.4.0"
 libp2p = "0.55"
 libp2p_dandelion = "0.1.1"

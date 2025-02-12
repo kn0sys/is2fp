@@ -8,7 +8,7 @@ pub const DEFAULT_APP_PORT:             u16 = 5555;
 /// Default http proxy port
 pub const DEFAULT_HTTP_PROXY_PORT:      u16 = 4242;
 /// Default app host
-pub const DEFAULT_HTTP_PROXY_HOST:      &str = "127.0.0.1";
+pub const DEFAULT_HTTP_PROXY_HOST:      &str = "http://127.0.0.1";
 /// I2P CONNECTION CHECK
 pub const I2P_STATUS:                   &str = "I2P_STATUS";
 /// Environment variable for the i2p proxy host
@@ -39,10 +39,6 @@ use std::{
         BufRead,
     },
     path::Path,
-    sync::mpsc::{
-        Receiver,
-        Sender,
-    },
     thread,
 };
 
@@ -50,21 +46,6 @@ use std::{
 lazy_static! {
     /// prevents infinite loop when checking for running router
     static ref IS_ROUTER_RUNNING: Mutex<bool> = Mutex::new(false);
-}
-
-struct Listener {
-    run_tx: Sender<bool>,
-    run_rx: Receiver<bool>,
-}
-
-impl Default for Listener {
-    fn default() -> Self {
-        let (run_tx, run_rx) = std::sync::mpsc::channel();
-        Listener {
-            run_tx,
-            run_rx,
-        }
-    }
 }
 
 /// https://doc.rust-lang.org/rust-by-example/std_misc/file/read_lines.html
@@ -96,12 +77,12 @@ impl ProxyStatus {
     }
 }
 
-/// Extract i2p port from command line arg
+/// Extract i2p port from environment
 fn get_i2p_proxy_port() -> String {
     let proxy_host = utils::get_i2p_http_proxy();
     let values = proxy_host.split(":");
     let mut v: Vec<String> = values.map(String::from).collect();
-    v.remove(1)
+    v.remove(2)
 }
 
 /// This is the `dest` value of the app i2p tunnels
@@ -162,13 +143,15 @@ fn process_tunnels(http_proxy_port: u16, app_sk: String) {
                 //l.is_running = true;
                 *IS_ROUTER_RUNNING.lock().unwrap() = true;
                 // start the http proxy
-                let http_proxy: tc::Tunnel = tc::Tunnel::new(
-                    "127.0.0.1".to_string(),
-                    http_proxy_port,
-                    tc::TunnelType::Http,
-                ).unwrap_or_default();
-                let _ = http_proxy.start(None);
-                log::info!("http proxy on port {}", http_proxy.get_port());
+                if http_proxy_port != 0 {
+                    let http_proxy: tc::Tunnel = tc::Tunnel::new(
+                        "127.0.0.1".to_string(),
+                        http_proxy_port,
+                        tc::TunnelType::Http,
+                    ).unwrap_or_default();
+                    let _ = http_proxy.start(None);
+                    log::info!("http proxy on port {}", http_proxy.get_port());
+                }
                 if app_sk.is_empty() {
                     let t = create_server_tunnel().unwrap_or_default();
                     let _ = t.start(None);
@@ -205,48 +188,31 @@ pub fn start() -> Result<(), ip2p_error::Ip2pError> {
             .map_err(|_| ip2p_error::Ip2pError::Database(MdbError::Panic))?;
     let app_sk: String = bincode::deserialize(&r_app_sk[..]).unwrap_or_default();
     log::info!("starting j4i2prs...");
-    // If you want to run multiple instances on the same machine set IS2FP_ROUTER_OVERRIDE=1
-    let pre_router = rw::Wrapper::create_router().map_err(|_| ip2p_error::Ip2pError::I2P);
     let router_override_disabled = std::env::var(IS2FP_ROUTER_OVERRIDE)
-        .unwrap_or("1".to_string()).is_empty();
-    if pre_router.is_err() && router_override_disabled {
-        panic!("fatal i2p router error (see wrapper.log)");
-    }
-    let mut o_router: Option<rw::Wrapper> = None;
-    if router_override_disabled {
-        o_router = Some(pre_router?);
-    }
-    let l: Listener = Default::default();
-    let run_tx = l.run_tx.clone();
-    let _ = thread::spawn(move || {
-        log::info!("run thread started");
-        run_tx
-            .send(true)
-            .unwrap_or_else(|_| log::error!("failed to run router"));
-    });
-
+        .unwrap_or("".to_string()).is_empty();
     // run the main thread forever unless we get a router shutdown signal
     let _ = thread::spawn(move || {
         if !router_override_disabled {
-            process_tunnels(http_proxy_port, app_sk);
+            // don't try to create multiple http proxy tunnels
+            process_tunnels(0, app_sk);
         } else {
-            // it should be safe to unwrap the router here...
-            let r = o_router.unwrap();
+            let router = rw::Wrapper::create_router().unwrap();
             std::thread::sleep(std::time::Duration::from_secs(10));
+            let mut run = false;
             loop {
-                if let Ok(run) = l.run_rx.try_recv() {
-                    if run {
-                        log::info!("starting router");
-                    r.invoke_router(rw::METHOD_RUN)
-                          .unwrap_or_else(|_| log::error!("failed to run router"));
-                    }
+                if !run {
+                    log::info!("starting router");
+                    router.invoke_router(rw::METHOD_RUN)
+                        .unwrap_or_else(|_| log::error!("failed to run router"));
+                    run = true;
+                    *IS_ROUTER_RUNNING.lock().unwrap() = true;
                 }
                 let is_running: bool = match IS_ROUTER_RUNNING.lock() {
                     Ok(m) => *m,
                     Err(_) => false,
                 };
                 if is_running {
-                    let is_router_on = r.is_running().unwrap_or_default();
+                    let is_router_on = router.is_running().unwrap_or_default();
                     if !is_router_on {
                         log::info!("router is warming up, please wait...");
                     }
@@ -254,6 +220,7 @@ pub fn start() -> Result<(), ip2p_error::Ip2pError> {
                     if is_router_on {
                         // check router config
                         process_tunnels(http_proxy_port, app_sk.clone());
+                        break;
                     }
                 }
             }

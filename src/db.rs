@@ -96,10 +96,10 @@ impl DatabaseEnvironment {
     ///
     /// from database operations as failures.
     pub fn read(e: &Environment, h: &DbHandle, k: &Vec<u8>) -> Result<Vec<u8>, MdbError> {
-        info!("excecuting lmdb read");
+        log::trace!("excecuting lmdb read");
         // don't try and read empty keys
         if k.is_empty() {
-            error!("can't read empty key");
+            log::trace!("can't read empty key");
             return Err(MdbError::NotFound);
         }
         let get_reader = e.get_reader();
@@ -118,7 +118,7 @@ impl DatabaseEnvironment {
         }
         {
             if result.is_empty() {
-                error!("failed to read key {:?} from db", k);
+                log::trace!("failed to read key {:?} from db", k);
             }
         }
         Ok(result)

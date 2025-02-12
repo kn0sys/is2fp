@@ -107,12 +107,15 @@ pub fn get_app_port() -> u16 {
 pub fn get_i2p_http_proxy() -> String {
     // attempt environment variable extraction, fall to default
     let proxy = std::env::var(i2p::I2P_PROXY_HOST);
-    proxy.unwrap_or(
-        format!("{}:{}",
-            i2p::DEFAULT_HTTP_PROXY_HOST,
-            i2p::DEFAULT_HTTP_PROXY_PORT
-        )
-    )
+    if let Err(e) = &proxy {
+        log::warn!("failed to read i2p proxy host: {:?}", e);
+    }
+    let u_proxy = proxy.unwrap_or_default();
+    if u_proxy.is_empty() {
+        format!("{}:{}", i2p::DEFAULT_HTTP_PROXY_HOST, i2p::DEFAULT_HTTP_PROXY_PORT)
+    } else {
+        u_proxy
+    }
 }
 
 fn reset_i2p_status() -> Result<(), is2fp_error::Ip2pError> {
@@ -126,7 +129,7 @@ fn reset_i2p_status() -> Result<(), is2fp_error::Ip2pError> {
 fn handle_messages(msg: Message, peer_id: libp2p::PeerId, local_peer_id: libp2p::PeerId) -> Result<(), is2fp_error::Ip2pError> {
     log::info!("handling message type: {:?}", &msg.m_type);
     if msg.m_type == MessageType::B32Exchange {
-        log::info!("processin address {} for relays", &msg.data.clone());
+        log::info!("processing address {} for relays", &msg.data.clone());
         // save b32.i2p for stem selection
         let mid = &msg.mid.clone();
         let l = &db::DATABASE_LOCK;
@@ -163,8 +166,10 @@ fn handle_messages(msg: Message, peer_id: libp2p::PeerId, local_peer_id: libp2p:
 
 pub async fn select_invisible_stem(mut msg: Message, peers: Vec<&libp2p::PeerId>) -> Result<(), is2fp_error::Ip2pError> {
     log::info!("start invisible stem selection");
+    log::info!("connected peers: {}", peers.len());
     // get random peer and their b32 address
     let r_peer = *peers.choose(&mut rand::rng()).unwrap();
+    log::debug!("random relay: {:?}", r_peer);
     let l = &db::DATABASE_LOCK;
     let b32_key = format!("{}-{}", RELAY_KEY, r_peer);
     let bytes_b32_key = b32_key.as_bytes().to_vec();
@@ -182,11 +187,13 @@ pub async fn select_invisible_stem(mut msg: Message, peers: Vec<&libp2p::PeerId>
     // pass message to invisible stem via i2p http proxy
     info!("broadcasting message to relay: {}", &relay_b32);
     let host = get_i2p_http_proxy();
+    log::debug!("setting i2p proxy to: {}", &host);
     let proxy = reqwest::Proxy::http(&host)
         .map_err(|_| is2fp_error::Ip2pError::Relay)?;
     let client = reqwest::Client::builder().proxy(proxy).build();
     match client.map_err(|_| is2fp_error::Ip2pError::Relay)?
-        .get(format!("http://{}/message", &relay_b32))
+        .post(format!("http://{}/message", &relay_b32))
+        .json(&msg)
         .send()
         .await
     {
@@ -209,9 +216,6 @@ fn extract_fluff() -> Vec<Message> {
     let k = FLUFF_KEY.as_bytes().to_vec();
     let b_fluff = db::DatabaseEnvironment::read(&l.env, &l.handle, &k).unwrap_or_default();
     let v_fluff: Vec<Message> = bincode::deserialize(&b_fluff[..]).unwrap_or_default();
-    if v_fluff.is_empty() {
-        log::info!("no messages found for fluff extraction");
-    }
     v_fluff
 }
 
@@ -391,9 +395,11 @@ pub async fn run_network() {
 ///
 /// the i2p fluff propagation b32 address.
 pub async fn start_up() -> Result<(), is2fp_error::Ip2pError> {
-    info!("is2fp is starting up");
+    info!("dandelion-is2fp is starting up");
     reset_i2p_status()?;
-    i2p::start()?;
+    if let Err(e) = i2p::start() {
+        log::error!("failed to start i2p: {:?}", e);
+    };
     // start async background tasks here
     {
         tokio::spawn(async move { 
@@ -412,7 +418,6 @@ pub async fn start_up() -> Result<(), is2fp_error::Ip2pError> {
                 run_network().await;
         });
     }
-    info!("dandelion-is2fp is online");
     let destination = i2p::get_destination();
     info!("relay server address - {}", destination?);
     Ok(())
