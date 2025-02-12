@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: 'true'
-      - run: ./scripts/build_release.sh ${{ steps.extract_branch.outputs.branch }}
+      - run: ./scripts/release.sh ${{ steps.extract_branch.outputs.branch }}
       - uses: actions/upload-artifact@v4
         with:
           name: is2fp-x86_64-linux-gnu-${{ steps.extract_branch.outputs.branch }}
