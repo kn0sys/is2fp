@@ -24,7 +24,7 @@ use std::sync::Mutex;
 const RELAY_KEY: &str = "b32";
 const FLUFF_KEY: &str = "fluff";
 const NETWORK_FLUFF: u64 = 32;
-const POW_LIMIT: u64 = 123456789;
+const POW_LIMIT: u64 = 1618;
 
 lazy_static! {
     /// used to prevent LMDB errors while propagating fluff messages
@@ -223,6 +223,17 @@ fn extract_fluff() -> Vec<Message> {
     v_fluff
 }
 
+fn update_fluff(v: Vec<Message>) {
+    log::info!("updating fluff");
+    let l = &db::DATABASE_LOCK;
+    let k = FLUFF_KEY.as_bytes().to_vec();
+    db::DatabaseEnvironment::delete(&l.env, &l.handle, &k)
+        .unwrap_or_else(|_| log::error!("failed to clear fluff"));
+    let b_v = bincode::serialize(&v).unwrap_or_default();
+    db::write_chunks(&l.env, &l.handle, &k, &b_v)
+        .unwrap_or_else(|_| log::error!("failed to update fluff"));
+}
+
 /// Consume a message over i2p relay from a random peer.
 ///
 /// Solve the proof-of-work and timestamp the message into LMDB.
@@ -300,13 +311,16 @@ pub async fn run_network() {
         let r_tick = rand::random_range(0..NETWORK_FLUFF);
         let tick = tokio::time::sleep(Duration::from_millis(r_tick));
         let fluff_msgs: Vec<Message> = extract_fluff();
+        let mut failed_msgs: Vec<Message> = Vec::new();
         if !fluff_msgs.is_empty() && !*IS_FLUFF_LOCKED.lock().unwrap() {
             for m in fluff_msgs {    
                 let b_msg = bincode::serialize(&m).unwrap_or_default();
                 if let Err(e) = node.broadcast_message(b_msg, fluff_topic.clone()) {
                     log::error!("fluff propagation failed for msg id: {} because: {:?}", &m.mid, e);
+                    failed_msgs.push(m);
                 }
             }
+            update_fluff(failed_msgs);
         }
         select! {
             Ok(Some(line)) = stdin.next_line() => {
